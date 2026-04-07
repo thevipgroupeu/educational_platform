@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createSupabaseClient } from '@/lib/supabase/client';
+import { Database } from '@/types/database';
 
 export default function SingleLessonPage() {
   const { id } = useParams();
@@ -10,7 +11,7 @@ export default function SingleLessonPage() {
   const supabase = createSupabaseClient();
 
   // Osnovni stateovi
-  const [lesson, setLesson] = useState<any>(null);
+  const [lesson, setLesson] = useState<Database['public']['Tables']['lessons']['Row'] | null>(null);
   const [slides, setSlides] = useState<string[]>([]);
   const [currentSlide, setCurrentSlide] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -53,10 +54,22 @@ export default function SingleLessonPage() {
   useEffect(() => {
     async function getLesson() {
       if (!id) return;
-      const { data } = await supabase.from('lessons').select('*').eq('id', id as string).single();
+      const { data, error } = await supabase
+        .from('lessons')
+        .select('*')
+        .eq('id', id as string)
+        .maybeSingle();
+
+      if (error) {
+        console.error('Error fetching lesson:', error);
+        setLoading(false);
+        return;
+      }
+
       if (data) {
         setLesson(data);
-        const splitSlides = data.content_text ? data.content_text.split('---') : ["No content."];
+        const contentText = data.content_text;
+        const splitSlides = contentText ? contentText.split('---') : ["No content."];
         setSlides(splitSlides.map((s: string) => s.trim()));
       }
       setLoading(false);
