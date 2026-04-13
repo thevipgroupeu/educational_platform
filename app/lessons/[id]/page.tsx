@@ -3,57 +3,34 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createSupabaseClient } from '@/lib/supabase/client';
-import { Database } from '@/types/database';
 
 export default function SingleLessonPage() {
   const { id } = useParams();
   const router = useRouter();
   const supabase = createSupabaseClient();
 
-  // Osnovni stateovi
-  const [lesson, setLesson] = useState<Database['public']['Tables']['lessons']['Row'] | null>(null);
-  const [slides, setSlides] = useState<string[]>([]);
-  const [currentSlide, setCurrentSlide] = useState(0);
+  // Stateovi za lekciju i pitanja
+  const [lesson, setLesson] = useState<any>(null);
+  const [quizQuestions, setQuizQuestions] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [seconds, setSeconds] = useState(0);
-
-  // Kviz stateovi
-  const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+  
+  // Stateovi za kviz
+  const [currentIdx, setCurrentIdx] = useState(0);
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [allAnswers, setAllAnswers] = useState<any[]>([]);
+  const [seconds, setSeconds] = useState(0);
 
-  // Definicija kviza za Pitagoru (Možeš ovo kasnije vući iz baze)
-  const quizQuestions = [
-    {
-      question: "1. If legs are a=6 and b=8, what is the hypotenuse c?",
-      options: ["10", "14", "48", "100"],
-      correct: "10"
-    },
-    {
-      question: "2. Which side is ALWAYS the longest in a right triangle?",
-      options: ["Side a", "Side b", "Hypotenuse (c)", "They are all equal"],
-      correct: "Hypotenuse (c)"
-    },
-    {
-      question: "3. Can we use a² + b² = c² on a triangle with angles 60°, 60°, 60°?",
-      options: ["Yes", "No", "Only if it is a large triangle"],
-      correct: "No"
-    }
-  ];
-
-  const isLastSlide = slides.length > 0 && currentSlide === slides.length - 1;
-  const isLastQuestion = currentQuestionIndex === quizQuestions.length - 1;
-
-  // 1. Tajmer u pozadini
+  // 1. Timer koji prati vrijeme rješavanja
   useEffect(() => {
     const timer = setInterval(() => setSeconds(prev => prev + 1), 1000);
     return () => clearInterval(timer);
   }, []);
 
-  // 2. Dohvaćanje lekcije
+  // 2. Dohvaćanje podataka o lekciji/kvizu iz Supabase-a
   useEffect(() => {
-    async function getLesson() {
+    async function getLessonData() {
       if (!id) return;
+      
       const { data, error } = await supabase
         .from('lessons')
         .select('*')
@@ -62,27 +39,34 @@ export default function SingleLessonPage() {
 
       if (error) {
         console.error('Error fetching lesson:', error);
-        setLoading(false);
-        return;
-      }
-
-      if (data) {
+      } else if (data) {
         setLesson(data);
-        const contentText = data.content_text;
-        const splitSlides = contentText ? contentText.split('---') : ["No content."];
-        setSlides(splitSlides.map((s: string) => s.trim()));
+        // Provjeravamo imamo li generirana pitanja iz PDF-a (quiz_data stupac)
+        if (data.quiz_data && Array.isArray(data.quiz_data)) {
+          setQuizQuestions(data.quiz_data);
+        } else {
+          // Fallback ako nema pitanja u bazi (za testiranje)
+          setQuizQuestions([
+            {
+              question: "Sample Question: What is 2+2?",
+              options: ["3", "4", "5"],
+              correct: "4"
+            }
+          ]);
+        }
       }
       setLoading(false);
     }
-    getLesson();
+    getLessonData();
   }, [id, supabase]);
 
-  // 3. Logika za prelazak na iduće pitanje ili slanje
-  const handleNextAction = async () => {
+  const isLastQuestion = currentIdx === quizQuestions.length - 1;
+
+  // 3. Logika za prelazak na iduće pitanje ili završetak
+  const handleNext = async () => {
     if (!selectedOption) return;
 
-    // Spremi trenutni odgovor u niz
-    const currentQ = quizQuestions[currentQuestionIndex];
+    const currentQ = quizQuestions[currentIdx];
     const answerData = {
       question: currentQ.question,
       user_answer: selectedOption,
@@ -94,31 +78,23 @@ export default function SingleLessonPage() {
     setAllAnswers(updatedAnswers);
 
     if (!isLastQuestion) {
-      // Idi na iduće pitanje
-      setCurrentQuestionIndex(prev => prev + 1);
+      setCurrentIdx(prev => prev + 1);
       setSelectedOption(null);
     } else {
-      // ZADNJE PITANJE - Šalji sve u bazu
       await submitFinalResults(updatedAnswers);
     }
   };
 
+  // 4. Slanje rezultata i pokretanje AI analize
   const submitFinalResults = async (finalAnswers: any[]) => {
-    // !!! ZALIJEPI SVOJ UUID OVDJE !!!
+    // Koristimo tvoj UUID za testiranje
     const TEST_PROFILE_ID = "daeea2c1-48a4-4066-967e-b6d43cbd2b1e"; 
 
     const correctCount = finalAnswers.filter(a => a.is_correct).length;
     const score = Math.round((correctCount / quizQuestions.length) * 100);
 
-    // Slanje aktivnosti
-    await supabase.from('activity_logs').insert([{ 
-      lesson_id: id as string,
-      profile_id: TEST_PROFILE_ID,
-      seconds_on_page: seconds
-    }]);
-
-    // Slanje rezultata kviza za AI analizu
-    const { error } = await supabase.from('quiz_results').insert([{
+    // Spremamo u 'quiz_results' tablicu
+    const { data, error } = await supabase.from('quiz_results').insert([{
       lesson_id: id as string,
       profile_id: TEST_PROFILE_ID,
       score_percentage: score,
@@ -127,18 +103,28 @@ export default function SingleLessonPage() {
         total_time: seconds,
         topic: lesson?.title 
       },
-      status: 'pending'
-    }]);
+      status: 'pending' // AI će ovo promijeniti u 'analyzed'
+    }]).select().single();
 
-    if (!error) {
-      alert(`Quiz Finished! Score: ${score}%`);
-      router.push('/lessons');
-    } else {
-      console.error(error);
+    if (error) {
+      console.error("Database Save Error:", error);
+      return;
     }
+
+    // POKRETANJE ANALIZE: Šaljemo signal našoj API ruti
+    if (data) {
+      fetch('/api/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resultId: data.id })
+      }).catch(err => console.error("AI Analysis Trigger Error:", err));
+    }
+
+    // Odmah šaljemo učenika na Dashboard
+    router.push('/dashboard');
   };
 
-  if (loading) return <div className="p-20 text-center font-bold">Loading Lesson...</div>;
+  if (loading) return <div className="p-20 text-center font-bold text-slate-500">Loading your AI quiz...</div>;
 
   return (
     <div className="max-w-3xl mx-auto p-6 min-h-screen flex flex-col bg-white text-slate-900 font-sans">
@@ -147,76 +133,53 @@ export default function SingleLessonPage() {
       <div className="w-full bg-slate-100 h-2 rounded-full mb-10 overflow-hidden">
         <div 
           className="bg-blue-600 h-full transition-all duration-500" 
-          style={{ width: `${((currentSlide + 1) / slides.length) * 100}%` }}
+          style={{ width: `${((currentIdx + 1) / quizQuestions.length) * 100}%` }}
         ></div>
       </div>
 
-      {/* Main Container */}
-      <div className="flex-grow flex flex-col justify-center bg-slate-50 border border-slate-200 rounded-[2rem] p-8 md:p-12 shadow-sm mb-10">
-        {!isLastSlide ? (
-          /* SLIDE CONTENT */
-          <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <p className="text-2xl md:text-3xl text-center leading-relaxed text-slate-800 font-medium italic">
-              {slides[currentSlide]}
-            </p>
+      {/* Quiz Card */}
+      <div className="flex-grow flex flex-col justify-center bg-slate-50 border border-slate-200 rounded-[2.5rem] p-8 md:p-12 shadow-sm mb-10">
+        <div className="animate-in fade-in zoom-in-95 duration-500">
+          <div className="text-center mb-8">
+            <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
+              {lesson?.title || 'Quiz'} • Question {currentIdx + 1} of {quizQuestions.length}
+            </span>
+            <h2 className="text-3xl font-extrabold mt-4 text-slate-800 leading-tight">
+              {quizQuestions[currentIdx]?.question}
+            </h2>
           </div>
-        ) : (
-          /* QUIZ CONTENT */
-          <div className="animate-in zoom-in-95 duration-300">
-            <div className="text-center mb-8">
-              <span className="bg-blue-100 text-blue-700 text-xs font-bold px-3 py-1 rounded-full uppercase tracking-wider">
-                Question {currentQuestionIndex + 1} of {quizQuestions.length}
-              </span>
-              <h2 className="text-2xl font-bold mt-4">{quizQuestions[currentQuestionIndex].question}</h2>
-            </div>
-            
-            <div className="grid grid-cols-1 gap-3 max-w-md mx-auto">
-              {quizQuestions[currentQuestionIndex].options.map((opt) => (
-                <button
-                  key={opt}
-                  onClick={() => setSelectedOption(opt)}
-                  className={`p-4 rounded-2xl border-2 text-left transition-all font-semibold ${
-                    selectedOption === opt 
-                    ? 'border-blue-600 bg-blue-600 text-white shadow-lg scale-[1.02]' 
-                    : 'border-white bg-white hover:border-blue-200 shadow-sm'
-                  }`}
-                >
-                  {opt}
-                </button>
-              ))}
-            </div>
+          
+          <div className="grid grid-cols-1 gap-4 max-w-md mx-auto">
+            {quizQuestions[currentIdx]?.options.map((opt: string) => (
+              <button
+                key={opt}
+                onClick={() => setSelectedOption(opt)}
+                className={`p-5 rounded-2xl border-2 text-left transition-all font-bold text-lg ${
+                  selectedOption === opt 
+                  ? 'border-blue-600 bg-blue-600 text-white shadow-lg scale-[1.02]' 
+                  : 'border-white bg-white hover:border-blue-200 shadow-sm text-slate-600 hover:text-slate-800'
+                }`}
+              >
+                {opt}
+              </button>
+            ))}
           </div>
-        )}
+        </div>
       </div>
 
-      {/* Navigation */}
-      <div className="flex justify-between items-center w-full max-w-lg mx-auto pb-10">
+      {/* Action Button */}
+      <div className="flex justify-center w-full pb-10">
         <button
-          onClick={() => setCurrentSlide(prev => prev - 1)}
-          disabled={currentSlide === 0 || (isLastSlide && currentQuestionIndex > 0)}
-          className={`font-bold px-4 py-2 ${currentSlide === 0 ? 'opacity-0' : 'text-slate-400 hover:text-slate-900'}`}
+          onClick={handleNext}
+          disabled={!selectedOption}
+          className={`px-12 py-5 rounded-2xl font-black text-xl transition-all shadow-2xl ${
+            selectedOption 
+            ? 'bg-slate-900 text-white hover:bg-blue-600 transform hover:-translate-y-1' 
+            : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+          }`}
         >
-          ← PREVIOUS
+          {isLastQuestion ? 'SUBMIT & SEE ANALYSIS' : 'NEXT QUESTION →'}
         </button>
-
-        {!isLastSlide ? (
-          <button
-            onClick={() => setCurrentSlide(prev => prev + 1)}
-            className="px-10 py-4 bg-slate-900 text-white rounded-2xl font-bold hover:bg-blue-600 transition-all shadow-xl"
-          >
-            NEXT SLIDE
-          </button>
-        ) : (
-          <button
-            onClick={handleNextAction}
-            disabled={!selectedOption}
-            className={`px-10 py-4 rounded-2xl font-bold transition-all shadow-xl ${
-              selectedOption ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-slate-200 text-slate-400 cursor-not-allowed'
-            }`}
-          >
-            {isLastQuestion ? 'FINISH & SUBMIT' : 'NEXT QUESTION →'}
-          </button>
-        )}
       </div>
     </div>
   );
